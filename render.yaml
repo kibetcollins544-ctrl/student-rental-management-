@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: student-rental-management
+    env: node
+    region: oregon
+    plan: free
+    buildCommand: npm install && node src/database/migrate.js && node src/database/seed.js
+    startCommand: node src/server.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3000
+      - key: JWT_SECRET
+        generateValue: true
+      - key: DB_PATH
+        value: ./src/database/rental.db
+      - key: DARAJA_ENV
+        value: sandbox
+      - key: DARAJA_CONSUMER_KEY
+        value: your_consumer_key_here
+      - key: DARAJA_CONSUMER_SECRET
+        value: your_consumer_secret_here
+      - key: DARAJA_SHORTCODE
+        value: "174379"
+      - key: DARAJA_PASSKEY
+        value: bfb279f9aa9bdbcf158e97dd71a467cd2e0c893059b10f78e6b72ada1ed2c919
+      - key: DARAJA_CALLBACK_URL
+        value: https://student-rental-management.onrender.com/api/payments/mpesa/callback
+      - key: AT_USERNAME
+        value: sandbox
+      - key: AT_API_KEY
+        value: your_africastalking_api_key_here
+      - key: AT_SENDER_ID
+        value: RENTAL
