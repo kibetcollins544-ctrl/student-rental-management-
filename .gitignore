@@ -1,0 +1,8 @@
+node_modules/
+src/database/rental.db
+src/database/rental.db-shm
+src/database/rental.db-wal
+.env
+*.log
+.DS_Store
+Thumbs.db
