@@ -14,6 +14,13 @@ const api = {
     if (body) opts.body = JSON.stringify(body);
 
     const res = await fetch(`${API_BASE}${path}`, opts);
+
+    // Guard against non-JSON responses (e.g. server not running)
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      throw new Error(`Server error (${res.status}): API not reachable`);
+    }
+
     const data = await res.json();
     if (!res.ok) throw new Error(data.message || 'Request failed');
     return data;

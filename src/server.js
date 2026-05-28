@@ -13,34 +13,47 @@ const PORT = process.env.PORT || 3000;
 // ── Security & Middleware ─────────────────────────────────────────────
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(cors());
-app.use(morgan('dev'));
+app.use(morgan('combined'));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Rate limiting
-const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 200 });
+// Rate limiting — only on API routes
+const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 500 });
 app.use('/api/', limiter);
 
-// ── Static Admin Dashboard ────────────────────────────────────────────
+// ── Health Check (before everything else) ────────────────────────────
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date(), port: PORT });
+});
+
+// ── API Routes (MUST come before static files) ───────────────────────
+app.use('/api/auth',       require('./routes/auth'));
+app.use('/api/dashboard',  require('./routes/dashboard'));
+app.use('/api/properties', require('./routes/properties'));
+app.use('/api/students',   require('./routes/students'));
+app.use('/api/invoices',   require('./routes/invoices'));
+app.use('/api/payments',   require('./routes/payments'));
+app.use('/api/admins',     require('./routes/admins'));
+app.use('/api/ussd',       require('./routes/ussd'));
+app.use('/api/whatsapp',   require('./routes/whatsapp'));
+
+// ── 404 handler for unknown /api routes ──────────────────────────────
+app.use('/api/*', (req, res) => {
+  res.status(404).json({ success: false, message: `API route not found: ${req.originalUrl}` });
+});
+
+// ── Static Admin Dashboard (AFTER API routes) ────────────────────────
 app.use(express.static(path.join(__dirname, '../public')));
 
-// ── API Routes ────────────────────────────────────────────────────────
-app.use('/api/auth', require('./routes/auth'));
-app.use('/api/dashboard', require('./routes/dashboard'));
-app.use('/api/properties', require('./routes/properties'));
-app.use('/api/students', require('./routes/students'));
-app.use('/api/invoices', require('./routes/invoices'));
-app.use('/api/payments', require('./routes/payments'));
-app.use('/api/admins', require('./routes/admins'));
-app.use('/api/ussd', require('./routes/ussd'));
-app.use('/api/whatsapp', require('./routes/whatsapp'));
-
-// ── Health Check ──────────────────────────────────────────────────────
-app.get('/api/health', (req, res) => res.json({ status: 'ok', timestamp: new Date() }));
-
-// ── Serve Dashboard SPA ───────────────────────────────────────────────
+// ── Serve Dashboard SPA for all non-API routes ───────────────────────
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '../public/index.html'));
+});
+
+// ── Global error handler ──────────────────────────────────────────────
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err.message);
+  res.status(500).json({ success: false, message: 'Internal server error' });
 });
 
 // ── Cron: Auto-generate invoices on 1st of each month ────────────────
@@ -80,11 +93,9 @@ cron.schedule('0 8 1 * *', async () => {
 
 // ── Start Server ──────────────────────────────────────────────────────
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`\n🚀 Student Rental System running on http://localhost:${PORT}`);
-  console.log(`📊 Admin Dashboard: http://localhost:${PORT}`);
-  console.log(`📱 USSD Endpoint: POST http://localhost:${PORT}/api/ussd`);
-  console.log(`💬 WhatsApp Endpoint: POST http://localhost:${PORT}/api/whatsapp`);
-  console.log(`💳 M-Pesa Callback: POST http://localhost:${PORT}/api/payments/mpesa/callback\n`);
+  console.log(`\n🚀 RentEase running on port ${PORT}`);
+  console.log(`📊 Dashboard: http://localhost:${PORT}`);
+  console.log(`🔑 Health:    http://localhost:${PORT}/api/health\n`);
 });
 
 module.exports = app;

@@ -58,6 +58,13 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, password })
     });
+
+    // Handle non-JSON (server down / wrong URL)
+    const contentType = res.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      throw new Error('Cannot reach server. Please try again in a moment.');
+    }
+
     const data = await res.json();
     if (!data.success) throw new Error(data.message);
 
