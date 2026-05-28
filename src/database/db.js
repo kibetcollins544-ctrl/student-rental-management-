@@ -2,7 +2,7 @@ require('dotenv').config();
 const path = require('path');
 const fs = require('fs');
 
-const dbPath = path.resolve(process.env.DB_PATH || './src/database/rental.db');
+const dbPath = path.resolve(process.env.DB_PATH || path.join(__dirname, '../database/rental.db'));
 const dir = path.dirname(dbPath);
 if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 

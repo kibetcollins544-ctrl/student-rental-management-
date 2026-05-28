@@ -48,23 +48,28 @@ cron.schedule('0 8 1 * *', async () => {
   console.log('⏰ Auto-generating monthly invoices...');
   try {
     const db = require('./database/db');
-    const { currentMonth, getDueDate, generateId } = require('./utils/helpers');
-    const month = currentMonth();
-    const dueDate = getDueDate(month);
-    const students = db.prepare(`
-      SELECT s.id as student_id, s.room_id, r.monthly_rent
-      FROM students s JOIN rooms r ON s.room_id = r.id
-      WHERE s.status='active' AND s.room_id IS NOT NULL
-    `).all();
+    const { v4: uuidv4 } = require('uuid');
+    const moment = require('moment');
+    const month = moment().format('YYYY-MM');
+    const dueDate = moment(month, 'YYYY-MM').date(5).format('YYYY-MM-DD');
+
+    const students = await db('students as s')
+      .join('rooms as r', 's.room_id', 'r.id')
+      .select('s.id as student_id', 's.room_id', 'r.monthly_rent')
+      .where('s.status', 'active').whereNotNull('s.room_id');
 
     let count = 0;
     for (const s of students) {
-      const exists = db.prepare('SELECT id FROM invoices WHERE student_id=? AND month=?').get(s.student_id, month);
+      const exists = await db('invoices').where({ student_id: s.student_id, month }).first();
       if (exists) continue;
-      const util = db.prepare("SELECT COALESCE(SUM(amount),0) as t FROM utility_readings WHERE room_id=? AND month=?").get(s.room_id, month);
-      const total = s.monthly_rent + (util.t || 0);
-      db.prepare('INSERT INTO invoices (id,student_id,room_id,month,rent_amount,utility_amount,total_amount,due_date) VALUES (?,?,?,?,?,?,?,?)')
-        .run(generateId(), s.student_id, s.room_id, month, s.monthly_rent, util.t || 0, total, dueDate);
+      const utilRow = await db('utility_readings').where({ room_id: s.room_id, month }).sum('amount as total').first();
+      const utilityAmount = utilRow.total || 0;
+      const total = s.monthly_rent + utilityAmount;
+      await db('invoices').insert({
+        id: uuidv4(), student_id: s.student_id, room_id: s.room_id,
+        month, rent_amount: s.monthly_rent, utility_amount: utilityAmount,
+        total_amount: total, due_date: dueDate, status: 'unpaid'
+      });
       count++;
     }
     console.log(`✅ Auto-generated ${count} invoices for ${month}`);
@@ -74,7 +79,7 @@ cron.schedule('0 8 1 * *', async () => {
 });
 
 // ── Start Server ──────────────────────────────────────────────────────
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`\n🚀 Student Rental System running on http://localhost:${PORT}`);
   console.log(`📊 Admin Dashboard: http://localhost:${PORT}`);
   console.log(`📱 USSD Endpoint: POST http://localhost:${PORT}/api/ussd`);

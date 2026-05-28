@@ -14,7 +14,7 @@ services:
       - key: JWT_SECRET
         generateValue: true
       - key: DB_PATH
-        value: ./src/database/rental.db
+        value: /opt/render/project/src/src/database/rental.db
       - key: DARAJA_ENV
         value: sandbox
       - key: DARAJA_CONSUMER_KEY
