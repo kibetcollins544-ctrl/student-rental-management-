@@ -20,14 +20,14 @@ router.post('/', express.urlencoded({ extended: false }), async (req, res) => {
   let reply = '';
 
   try {
-    const student = await db('students').where('phone', phone).first();
+    const student = db.prepare('SELECT * FROM students WHERE phone = ?').get(phone);
 
     if (!student) {
       reply = `Hello! Your number is not registered in our system.\nContact your caretaker to register you.\n\nReply *menu* for help.`;
     } else if (['hi', 'hello', 'menu', 'help', 'start'].includes(text)) {
       reply = `Hello ${student.name.split(' ')[0]}! 👋\n\nWhat would you like to do?\n\n1️⃣ Reply *balance* - Check your balance\n2️⃣ Reply *pay* - Pay rent via M-Pesa\n3️⃣ Reply *history* - Payment history\n4️⃣ Reply *room* - My room details\n5️⃣ Reply *contact* - Caretaker contact`;
     } else if (text === 'balance') {
-      const invoice = await db('invoices').where('student_id', student.id).whereNot('status', 'paid').orderBy('month', 'desc').first();
+      const invoice = db.prepare(`SELECT * FROM invoices WHERE student_id = ? AND status != 'paid' ORDER BY month DESC LIMIT 1`).get(student.id);
       if (!invoice) {
         reply = `✅ Great news ${student.name.split(' ')[0]}! You have no outstanding balance.`;
       } else {
@@ -35,7 +35,7 @@ router.post('/', express.urlencoded({ extended: false }), async (req, res) => {
         reply = `📋 *Invoice for ${invoice.month}*\n\nRent: ${fmt(invoice.rent_amount)}\nUtilities: ${fmt(invoice.utility_amount)}\nTotal: ${fmt(invoice.total_amount)}\nPaid: ${fmt(invoice.paid_amount)}\n*Balance: ${fmt(balance)}*\nDue Date: ${invoice.due_date}\n\nReply *pay* to pay now via M-Pesa.`;
       }
     } else if (text === 'pay') {
-      const invoice = await db('invoices').where('student_id', student.id).whereNot('status', 'paid').orderBy('month', 'desc').first();
+      const invoice = db.prepare(`SELECT * FROM invoices WHERE student_id = ? AND status != 'paid' ORDER BY month DESC LIMIT 1`).get(student.id);
       if (!invoice) {
         reply = `✅ No pending invoice. You're all paid up!`;
       } else {
@@ -44,14 +44,12 @@ router.post('/', express.urlencoded({ extended: false }), async (req, res) => {
           await stkPush({ phone, amount: balance, invoiceId: invoice.id, studentName: student.name });
           reply = `📲 M-Pesa payment request sent!\n\nAmount: *${fmt(balance)}*\n\nCheck your phone and enter your M-Pesa PIN to complete payment.\n\nReply *balance* after payment to confirm.`;
         } catch (e) {
+          console.error('WhatsApp payment error:', e.message || e);
           reply = `❌ Could not initiate payment. Please try again or pay cash to your caretaker.`;
         }
       }
     } else if (text === 'history') {
-      const payments = await db('payments as p').join('invoices as i', 'p.invoice_id', 'i.id')
-        .select('p.amount', 'p.mpesa_code', 'p.paid_at', 'i.month')
-        .where('p.student_id', student.id).where('p.status', 'completed')
-        .orderBy('p.paid_at', 'desc').limit(5);
+      const payments = db.prepare(`SELECT p.amount, p.mpesa_code, p.paid_at, i.month FROM payments p JOIN invoices i ON p.invoice_id = i.id WHERE p.student_id = ? AND p.status = 'completed' ORDER BY p.paid_at DESC LIMIT 5`).all(student.id);
       if (!payments.length) {
         reply = `No payment history found.`;
       } else {
@@ -59,27 +57,25 @@ router.post('/', express.urlencoded({ extended: false }), async (req, res) => {
         reply = `📜 *Your Last ${payments.length} Payments:*\n\n${lines}`;
       }
     } else if (text === 'room') {
-      const room = student.room_id ? await db('rooms as r').join('properties as p', 'r.property_id', 'p.id')
-        .select('r.room_number', 'r.type', 'r.monthly_rent', 'p.name as property_name', 'p.address')
-        .where('r.id', student.room_id).first() : null;
+      const room = student.room_id && db.prepare(`SELECT r.room_number, r.type, r.monthly_rent, p.name as property_name, p.address FROM rooms r JOIN properties p ON r.property_id = p.id WHERE r.id = ?`).get(student.room_id);
       if (!room) {
         reply = `No room assigned. Contact your caretaker.`;
       } else {
         reply = `🏠 *Your Room Details*\n\nRoom: ${room.room_number} (${room.type})\nProperty: ${room.property_name}\nAddress: ${room.address}\nMonthly Rent: ${fmt(room.monthly_rent)}\nLease Start: ${student.lease_start || 'N/A'}\nLease End: ${student.lease_end || 'Open-ended'}`;
       }
     } else if (text === 'contact') {
-      const roomRow = student.room_id ? await db('rooms').where('id', student.room_id).first() : null;
-      const admin = roomRow ? await db('admins as a').join('properties as p', 'p.admin_id', 'a.id').select('a.name', 'a.phone').where('p.id', roomRow.property_id).first() : null;
+      const roomRow = student.room_id && db.prepare(`SELECT property_id FROM rooms WHERE id = ?`).get(student.room_id);
+      const admin = roomRow && db.prepare(`SELECT a.name, a.phone FROM admins a JOIN properties p ON p.admin_id = a.id WHERE p.id = ?`).get(roomRow.property_id);
       reply = admin ? `📞 *Caretaker Contact*\n\nName: ${admin.name}\nPhone: +${admin.phone}` : `Contact your property manager for assistance.`;
     } else {
       reply = `I didn't understand that. Reply *menu* to see available options.`;
     }
   } catch (err) {
-    console.error('WhatsApp error:', err.message);
+    console.error('WhatsApp error:', err.message || err);
     reply = `Service error. Please try again later.`;
   }
 
-  try { await sendWhatsApp(phone, reply); } catch (e) { console.error('WA send error:', e.message); }
+  try { await sendWhatsApp(phone, reply); } catch (e) { console.error('WA send error:', e.message || e); }
   res.status(200).send('OK');
 });
 

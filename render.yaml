@@ -9,12 +9,8 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
-      - key: PORT
-        value: 3000
       - key: JWT_SECRET
         generateValue: true
-      - key: DB_PATH
-        value: /opt/render/project/src/src/database/rental.db
       - key: DARAJA_ENV
         value: sandbox
       - key: DARAJA_CONSUMER_KEY

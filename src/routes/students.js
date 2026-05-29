@@ -4,79 +4,55 @@ const db = require('../database/db');
 const auth = require('../middleware/auth');
 const { v4: uuidv4 } = require('uuid');
 
-const formatPhone = (phone) => {
-  phone = phone.toString().replace(/\s+/g, '').replace(/^\+/, '');
-  if (phone.startsWith('0')) phone = '254' + phone.slice(1);
-  if (phone.startsWith('7') || phone.startsWith('1')) phone = '254' + phone;
-  return phone;
-};
+const fmtPhone = p => { p=p.toString().replace(/\s+/g,'').replace(/^\+/,''); if(p.startsWith('0'))p='254'+p.slice(1); if(p.startsWith('7')||p.startsWith('1'))p='254'+p; return p; };
 
-router.get('/', auth, async (req, res) => {
+router.get('/', auth, (req, res) => {
   try {
-    const students = await db('students as s')
-      .leftJoin('rooms as r', 's.room_id', 'r.id')
-      .leftJoin('properties as p', 'r.property_id', 'p.id')
-      .select('s.*', 'r.room_number', 'r.monthly_rent', 'p.name as property_name')
-      .orderBy('s.created_at', 'desc');
+    const students = db.prepare(`SELECT s.*,r.room_number,r.monthly_rent,p.name as property_name FROM students s LEFT JOIN rooms r ON s.room_id=r.id LEFT JOIN properties p ON r.property_id=p.id ORDER BY s.created_at DESC`).all();
     res.json({ success: true, data: students });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 });
 
-router.get('/:id', auth, async (req, res) => {
+router.get('/:id', auth, (req, res) => {
   try {
-    const student = await db('students as s')
-      .leftJoin('rooms as r', 's.room_id', 'r.id')
-      .leftJoin('properties as p', 'r.property_id', 'p.id')
-      .select('s.*', 'r.room_number', 'r.monthly_rent', 'p.name as property_name')
-      .where('s.id', req.params.id).first();
-    if (!student) return res.status(404).json({ success: false, message: 'Student not found' });
-    res.json({ success: true, data: student });
+    const s = db.prepare(`SELECT s.*,r.room_number,r.monthly_rent,p.name as property_name FROM students s LEFT JOIN rooms r ON s.room_id=r.id LEFT JOIN properties p ON r.property_id=p.id WHERE s.id=?`).get(req.params.id);
+    if (!s) return res.status(404).json({ success: false, message: 'Student not found' });
+    res.json({ success: true, data: s });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 });
 
-router.post('/', auth, async (req, res) => {
-  const { name, phone, email, id_number, institution, room_id, lease_start, lease_end } = req.body;
-  if (!name || !phone) return res.status(400).json({ success: false, message: 'Name and phone required' });
+router.post('/', auth, (req, res) => {
   try {
-    const normalizedPhone = formatPhone(phone);
-    const existing = await db('students').where('phone', normalizedPhone).first();
-    if (existing) return res.status(409).json({ success: false, message: 'Phone already registered' });
+    const { name, phone, email, id_number, institution, room_id, lease_start, lease_end } = req.body;
+    if (!name || !phone) return res.status(400).json({ success: false, message: 'Name and phone required' });
+    const np = fmtPhone(phone);
+    if (db.prepare('SELECT id FROM students WHERE phone=?').get(np)) return res.status(409).json({ success: false, message: 'Phone already registered' });
     const id = uuidv4();
-    await db('students').insert({ id, name, phone: normalizedPhone, email, id_number, institution, room_id, lease_start, lease_end });
-    if (room_id) await db('rooms').where('id', room_id).update({ status: 'occupied' });
+    db.prepare("INSERT INTO students (id,name,phone,email,id_number,institution,room_id,lease_start,lease_end) VALUES (?,?,?,?,?,?,?,?,?)")
+      .run(id, name, np, email||null, id_number||null, institution||null, room_id||null, lease_start||null, lease_end||null);
+    if (room_id) db.prepare("UPDATE rooms SET status='occupied' WHERE id=?").run(room_id);
     res.status(201).json({ success: true, message: 'Student registered', id });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 });
 
-router.patch('/:id', auth, async (req, res) => {
-  const { name, email, institution, room_id, lease_start, lease_end, status } = req.body;
+router.patch('/:id', auth, (req, res) => {
   try {
-    const student = await db('students').where('id', req.params.id).first();
-    if (!student) return res.status(404).json({ success: false, message: 'Student not found' });
-    if (room_id && room_id !== student.room_id) {
-      if (student.room_id) await db('rooms').where('id', student.room_id).update({ status: 'vacant' });
-      await db('rooms').where('id', room_id).update({ status: 'occupied' });
+    const { name, email, institution, room_id, lease_start, lease_end, status } = req.body;
+    const s = db.prepare('SELECT * FROM students WHERE id=?').get(req.params.id);
+    if (!s) return res.status(404).json({ success: false, message: 'Student not found' });
+    if (room_id && room_id !== s.room_id) {
+      if (s.room_id) db.prepare("UPDATE rooms SET status='vacant' WHERE id=?").run(s.room_id);
+      db.prepare("UPDATE rooms SET status='occupied' WHERE id=?").run(room_id);
     }
-    const update = {};
-    if (name) update.name = name;
-    if (email) update.email = email;
-    if (institution) update.institution = institution;
-    if (room_id) update.room_id = room_id;
-    if (lease_start) update.lease_start = lease_start;
-    if (lease_end) update.lease_end = lease_end;
-    if (status) update.status = status;
-    await db('students').where('id', req.params.id).update(update);
+    db.prepare(`UPDATE students SET name=COALESCE(?,name),email=COALESCE(?,email),institution=COALESCE(?,institution),room_id=COALESCE(?,room_id),lease_start=COALESCE(?,lease_start),lease_end=COALESCE(?,lease_end),status=COALESCE(?,status) WHERE id=?`)
+      .run(name||null,email||null,institution||null,room_id||null,lease_start||null,lease_end||null,status||null,req.params.id);
     res.json({ success: true, message: 'Student updated' });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 });
 
-router.get('/:id/invoices', auth, async (req, res) => {
+router.get('/:id/invoices', auth, (req, res) => {
   try {
-    const invoices = await db('invoices as i')
-      .join('rooms as r', 'i.room_id', 'r.id')
-      .select('i.*', 'r.room_number')
-      .where('i.student_id', req.params.id)
-      .orderBy('i.month', 'desc');
+    const invoices = db.prepare(`SELECT i.*,(i.total_amount-i.paid_amount) as balance,r.room_number FROM invoices i JOIN rooms r ON i.room_id=r.id WHERE i.student_id=? ORDER BY i.month DESC`).all(req.params.id);
     res.json({ success: true, data: invoices });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 });

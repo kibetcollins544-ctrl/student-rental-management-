@@ -5,89 +5,70 @@ const auth = require('../middleware/auth');
 const { stkPush, stkQuery } = require('../services/daraja');
 const { v4: uuidv4 } = require('uuid');
 
-const formatPhone = (phone) => {
-  phone = phone.toString().replace(/\s+/g, '').replace(/^\+/, '');
-  if (phone.startsWith('0')) phone = '254' + phone.slice(1);
-  if (phone.startsWith('7') || phone.startsWith('1')) phone = '254' + phone;
-  return phone;
-};
+const fmtPhone = p => { p=p.toString().replace(/\s+/g,'').replace(/^\+/,''); if(p.startsWith('0'))p='254'+p.slice(1); if(p.startsWith('7')||p.startsWith('1'))p='254'+p; return p; };
 
 router.post('/mpesa/stk', async (req, res) => {
-  const { invoice_id, phone } = req.body;
-  if (!invoice_id || !phone) return res.status(400).json({ success: false, message: 'invoice_id and phone required' });
   try {
-    const invoice = await db('invoices as i').join('students as s', 'i.student_id', 's.id')
-      .select('i.*', 's.name as student_name').where('i.id', invoice_id).first();
-    if (!invoice) return res.status(404).json({ success: false, message: 'Invoice not found' });
-    if (invoice.status === 'paid') return res.status(400).json({ success: false, message: 'Invoice already paid' });
-    const normalizedPhone = formatPhone(phone);
-    const balance = invoice.total_amount - invoice.paid_amount;
-    const result = await stkPush({ phone: normalizedPhone, amount: balance, invoiceId: invoice.id, studentName: invoice.student_name });
-    const paymentId = uuidv4();
-    await db('payments').insert({
-      id: paymentId, invoice_id, student_id: invoice.student_id, amount: balance,
-      method: 'mpesa', mpesa_phone: normalizedPhone, status: 'pending',
-      checkout_request_id: result.CheckoutRequestID, merchant_request_id: result.MerchantRequestID
-    });
-    res.json({ success: true, message: 'STK Push sent. Check your phone to complete payment.', checkout_request_id: result.CheckoutRequestID, payment_id: paymentId });
-  } catch (err) {
-    console.error('STK Push error:', err.response?.data || err.message);
-    res.status(500).json({ success: false, message: 'Failed to initiate payment', error: err.response?.data });
-  }
+    const { invoice_id, phone } = req.body;
+    if (!invoice_id||!phone) return res.status(400).json({ success: false, message: 'invoice_id and phone required' });
+    const inv = db.prepare(`SELECT i.*,s.name as student_name FROM invoices i JOIN students s ON i.student_id=s.id WHERE i.id=?`).get(invoice_id);
+    if (!inv) return res.status(404).json({ success: false, message: 'Invoice not found' });
+    if (inv.status==='paid') return res.status(400).json({ success: false, message: 'Invoice already paid' });
+    const np = fmtPhone(phone);
+    const balance = inv.total_amount - inv.paid_amount;
+    const result = await stkPush({ phone: np, amount: balance, invoiceId: inv.id, studentName: inv.student_name });
+    const pid = uuidv4();
+    db.prepare("INSERT INTO payments (id,invoice_id,student_id,amount,method,mpesa_phone,status,checkout_request_id,merchant_request_id) VALUES (?,?,?,?,?,?,?,?,?)")
+      .run(pid, invoice_id, inv.student_id, balance, 'mpesa', np, 'pending', result.CheckoutRequestID, result.MerchantRequestID);
+    res.json({ success: true, message: 'STK Push sent. Check your phone to complete payment.', checkout_request_id: result.CheckoutRequestID, payment_id: pid });
+  } catch (err) { res.status(500).json({ success: false, message: 'Failed to initiate payment', error: err.response?.data || err.message }); }
 });
 
-router.post('/mpesa/callback', async (req, res) => {
-  const body = req.body?.Body?.stkCallback;
-  if (!body) return res.status(200).json({ ResultCode: 0 });
-  const { CheckoutRequestID, ResultCode, ResultDesc, CallbackMetadata } = body;
+router.post('/mpesa/callback', (req, res) => {
   try {
-    const payment = await db('payments').where('checkout_request_id', CheckoutRequestID).first();
+    const body = req.body?.Body?.stkCallback;
+    if (!body) return res.status(200).json({ ResultCode: 0 });
+    const { CheckoutRequestID, ResultCode, CallbackMetadata } = body;
+    const payment = db.prepare('SELECT * FROM payments WHERE checkout_request_id=?').get(CheckoutRequestID);
     if (!payment) return res.status(200).json({ ResultCode: 0 });
     if (ResultCode === 0) {
       const items = CallbackMetadata?.Item || [];
-      const mpesaCode = items.find(i => i.Name === 'MpesaReceiptNumber')?.Value;
-      const paidAmount = items.find(i => i.Name === 'Amount')?.Value;
-      await db('payments').where('checkout_request_id', CheckoutRequestID).update({ status: 'completed', mpesa_code: mpesaCode, paid_at: new Date().toISOString() });
-      const invoice = await db('invoices').where('id', payment.invoice_id).first();
-      const newPaid = (invoice.paid_amount || 0) + (paidAmount || payment.amount);
-      const newStatus = newPaid >= invoice.total_amount ? 'paid' : 'partial';
-      await db('invoices').where('id', payment.invoice_id).update({ paid_amount: newPaid, status: newStatus });
+      const mpesaCode = items.find(i=>i.Name==='MpesaReceiptNumber')?.Value;
+      const paidAmt   = items.find(i=>i.Name==='Amount')?.Value;
+      db.prepare("UPDATE payments SET status='completed',mpesa_code=?,paid_at=CURRENT_TIMESTAMP WHERE checkout_request_id=?").run(mpesaCode, CheckoutRequestID);
+      const inv = db.prepare('SELECT * FROM invoices WHERE id=?').get(payment.invoice_id);
+      const newPaid = (inv.paid_amount||0) + (paidAmt||payment.amount);
+      db.prepare("UPDATE invoices SET paid_amount=?,status=? WHERE id=?").run(newPaid, newPaid>=inv.total_amount?'paid':'partial', payment.invoice_id);
     } else {
-      await db('payments').where('checkout_request_id', CheckoutRequestID).update({ status: 'failed' });
+      db.prepare("UPDATE payments SET status='failed' WHERE checkout_request_id=?").run(CheckoutRequestID);
     }
   } catch (err) { console.error('Callback error:', err.message); }
   res.status(200).json({ ResultCode: 0 });
 });
 
-router.post('/cash', auth, async (req, res) => {
-  const { invoice_id, amount } = req.body;
-  if (!invoice_id || !amount) return res.status(400).json({ success: false, message: 'invoice_id and amount required' });
+router.post('/cash', auth, (req, res) => {
   try {
-    const invoice = await db('invoices').where('id', invoice_id).first();
-    if (!invoice) return res.status(404).json({ success: false, message: 'Invoice not found' });
-    const paymentId = uuidv4();
-    await db('payments').insert({ id: paymentId, invoice_id, student_id: invoice.student_id, amount, method: 'cash', status: 'completed', paid_at: new Date().toISOString() });
-    const newPaid = (invoice.paid_amount || 0) + Number(amount);
-    const newStatus = newPaid >= invoice.total_amount ? 'paid' : 'partial';
-    await db('invoices').where('id', invoice_id).update({ paid_amount: newPaid, status: newStatus });
-    res.json({ success: true, message: 'Cash payment recorded', payment_id: paymentId });
+    const { invoice_id, amount } = req.body;
+    if (!invoice_id||!amount) return res.status(400).json({ success: false, message: 'invoice_id and amount required' });
+    const inv = db.prepare('SELECT * FROM invoices WHERE id=?').get(invoice_id);
+    if (!inv) return res.status(404).json({ success: false, message: 'Invoice not found' });
+    const pid = uuidv4();
+    db.prepare("INSERT INTO payments (id,invoice_id,student_id,amount,method,status,paid_at) VALUES (?,?,?,?,?,?,CURRENT_TIMESTAMP)")
+      .run(pid, invoice_id, inv.student_id, amount, 'cash', 'completed');
+    const newPaid = (inv.paid_amount||0) + Number(amount);
+    db.prepare("UPDATE invoices SET paid_amount=?,status=? WHERE id=?").run(newPaid, newPaid>=inv.total_amount?'paid':'partial', invoice_id);
+    res.json({ success: true, message: 'Cash payment recorded', payment_id: pid });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 });
 
 router.get('/status/:checkoutId', async (req, res) => {
-  try {
-    const result = await stkQuery(req.params.checkoutId);
-    res.json({ success: true, data: result });
-  } catch (err) { res.status(500).json({ success: false, message: 'Query failed' }); }
+  try { res.json({ success: true, data: await stkQuery(req.params.checkoutId) }); }
+  catch (err) { res.status(500).json({ success: false, message: 'Query failed' }); }
 });
 
-router.get('/', auth, async (req, res) => {
+router.get('/', auth, (req, res) => {
   try {
-    const payments = await db('payments as p')
-      .join('students as s', 'p.student_id', 's.id')
-      .join('invoices as i', 'p.invoice_id', 'i.id')
-      .select('p.*', 's.name as student_name', 'i.month')
-      .orderBy('p.created_at', 'desc').limit(200);
+    const payments = db.prepare(`SELECT p.*,s.name as student_name,i.month FROM payments p JOIN students s ON p.student_id=s.id JOIN invoices i ON p.invoice_id=i.id ORDER BY p.created_at DESC LIMIT 200`).all();
     res.json({ success: true, data: payments });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 });
